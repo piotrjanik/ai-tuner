@@ -1,0 +1,119 @@
+version: "3"
+
+vars:
+  VENV: .venv
+  PYTHON: "{{.VENV}}/bin/python"
+  # CPU priority: 0=normal, 10=polite, 19=background. Use when laptop is in use.
+  NICE: "0"
+  # Override on CLI: task export:gguf QUANT=Q4_K_M  or  task push:hf:gguf MODEL_NAME=x HF_REPO=user/x
+  QUANT:
+    sh: grep 'gguf_quantization:' config.yaml | awk '{print $2}' | tr -d '"'
+  QUANT_LOWER: "{{.QUANT | lower}}"
+  HF_REPO:
+    sh: grep 'hf_repo:' config.yaml | awk '{print $2}' | tr -d '"'
+  MODEL_NAME:
+    sh: grep 'ollama_model_name:' config.yaml | awk '{print $2}' | tr -d '"'
+  LLAMA_CONVERT:
+    sh: ls /opt/homebrew/Cellar/llama.cpp/*/libexec/convert_hf_to_gguf.py | tail -1
+
+tasks:
+  cli:
+    desc: "Run the CLI (e.g. task cli -- train --nice 10)"
+    deps: [venv]
+    cmds:
+      - "{{.PYTHON}} src/cli.py {{.CLI_ARGS}}"
+
+  venv:
+    desc: Create .venv and install dependencies
+    cmds:
+      - "test -d {{.VENV}} || uv venv {{.VENV}}"
+      - uv pip install -r src/requirements.txt
+
+  repos:
+    desc: Clone source repos from config.yaml
+    deps: [venv]
+    cmds:
+      - "{{.PYTHON}} src/data/prepare_data.py --clone-only"
+
+  data:
+    desc: Extract training data from all sources
+    deps: [venv]
+    cmds:
+      - "{{.PYTHON}} src/data/prepare_data.py"
+
+  stats:
+    desc: Show data extraction stats (no files written)
+    deps: [venv]
+    cmds:
+      - "{{.PYTHON}} src/data/prepare_data.py --stats-only"
+
+  train:
+    desc: "Fine-tune with mlx-lm. Throttle: task train NICE=10 -- --batch-size 1 --max-seq-length 2048"
+    deps: [data, venv]
+    cmds:
+      - "nice -n {{.NICE}} {{.PYTHON}} src/train/train.py {{.CLI_ARGS}}"
+
+  export:
+    desc: Fuse LoRA adapters into output/merged/ (float16)
+    deps: [venv]
+    preconditions:
+      - test -d output/adapters
+    cmds:
+      - "{{.PYTHON}} src/export/export_model.py"
+
+  export:gguf:
+    desc: "Convert merged model to {{.QUANT}} GGUF for Ollama / LM Studio"
+    deps: [venv]
+    preconditions:
+      - sh: test -d output/merged
+        msg: "Run 'task export' first"
+    cmds:
+      - mkdir -p output/gguf
+      - "{{.PYTHON}} {{.LLAMA_CONVERT}} output/merged --outfile output/gguf/{{.MODEL_NAME}}-f16.gguf --outtype f16"
+      - llama-quantize output/gguf/{{.MODEL_NAME}}-f16.gguf output/gguf/{{.MODEL_NAME}}-{{.QUANT_LOWER}}.gguf {{.QUANT}}
+      - rm output/gguf/{{.MODEL_NAME}}-f16.gguf
+      - ls -lh output/gguf/
+
+  push:hf:
+    desc: Push LoRA adapters to HuggingFace Hub
+    deps: [venv]
+    preconditions:
+      - test -d output/adapters
+    cmds:
+      - "{{.PYTHON}} src/export/export_model.py --push"
+
+  push:hf:gguf:
+    desc: "Push {{.QUANT}} GGUF to HuggingFace (downloadable by LM Studio and Ollama)"
+    deps: [venv]
+    preconditions:
+      - sh: test -f output/gguf/{{.MODEL_NAME}}-{{.QUANT_LOWER}}.gguf
+        msg: "Run 'task export:gguf' first"
+    cmds:
+      - "{{.PYTHON}} -m huggingface_hub.cli.hf upload {{.HF_REPO}} output/gguf/{{.MODEL_NAME}}-{{.QUANT_LOWER}}.gguf {{.MODEL_NAME}}-{{.QUANT_LOWER}}.gguf --repo-type model"
+
+  ollama:
+    desc: Import GGUF into Ollama
+    preconditions:
+      - sh: test -f output/gguf/{{.MODEL_NAME}}-{{.QUANT_LOWER}}.gguf
+        msg: "Run 'task export:gguf' first"
+    cmds:
+      - ollama create {{.MODEL_NAME}} -f output/gguf/Modelfile
+
+  infer:
+    desc: Interactive inference with the fine-tuned model
+    deps: [venv]
+    preconditions:
+      - test -d output/adapters
+    cmds:
+      - "{{.PYTHON}} src/inference/inference.py -i"
+    interactive: true
+
+  clean:
+    desc: Remove generated data and model outputs
+    cmds:
+      - rm -rf data/ output/
+
+  clean:all:
+    desc: Remove everything (data, output, repos, venv)
+    cmds:
+      - rm -rf data/ output/ repos/ {{.VENV}}

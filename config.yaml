@@ -1,0 +1,170 @@
+# Fine-tuning Configuration
+
+# System prompt injected into every training example and used during inference.
+# Tailor this to your domain.
+system_prompt: >-
+  You are an expert on cloud-native software packaging, distribution, and the
+  Open Component Model (OCM). You have deep knowledge of: the OCM core library
+  and CLI (ocm.software/ocm), the next-generation modular OCM
+  (open-component-model), the Open Container Initiative (OCI) specifications
+  (distribution, image, runtime), the OCI artifacts library (oras.land/oras-go),
+  and the Go programming language. You can explain Go code, interpret
+  specifications, answer architecture questions, and assist with development in
+  these ecosystems.
+
+# Training data sources.
+# Each entry must have a name and either:
+#   - url: cloned automatically into repos.dir/<name>
+#   - path: explicit local path (skips cloning)
+# type field controls how the source is processed:
+#   - go_code (default): parse Go source files
+#   - spec: extract sections from Markdown specification files
+sources:
+  # Go code repositories
+  - name: ocm
+    url: https://github.com/open-component-model/ocm
+    type: go_code
+    description: "Legacy Open-Component-Model"
+  - name: open-component-model
+    url: https://github.com/open-component-model/open-component-model
+    type: go_code
+    description: "Next-gen Open-Component-Model"
+  - name: oras-go
+    url: https://github.com/oras-project/oras-go
+    type: go_code
+    description: "OCI artifacts Go library (oras.land/oras-go)"
+
+  # Open Container Initiative specifications
+  - name: distribution-spec
+    url: https://github.com/opencontainers/distribution-spec
+    type: spec
+    domain: "OCI Distribution Specification"
+  - name: image-spec
+    url: https://github.com/opencontainers/image-spec
+    type: spec
+    domain: "OCI Image Specification"
+  - name: runtime-spec
+    url: https://github.com/opencontainers/runtime-spec
+    type: spec
+    domain: "OCI Runtime Specification"
+
+  # Open Component Model specification
+  - name: ocm-spec
+    url: https://github.com/open-component-model/ocm-spec
+    type: spec
+    domain: "Open Component Model Specification"
+
+  # Diataxis documentation framework specification
+  - name: diataxis
+    url: https://github.com/evildmp/diataxis-documentation-framework
+    type: spec
+    domain: "Diataxis Documentation Framework"
+
+  # Go style guides and best practices
+  - name: uber-go-guide
+    url: https://github.com/uber-go/guide
+    type: spec
+    domain: "Uber Go Style Guide"
+  - name: go-proverbs
+    url: https://github.com/go-proverbs/go-proverbs.github.io
+    type: spec
+    domain: "Go Proverbs"
+
+# Where to clone remote repos (relative to this config file)
+repos:
+  dir: ./repos
+
+# Data preparation
+data:
+  output_dir: ./data
+  max_code_chars: 4096
+  min_code_chars: 50
+  include_tests: false     # tests teach edge cases, not core patterns
+  skip_generated: true
+  skip_patterns:
+    - "**/vendor/**"
+    - "**/testdata/**"
+    - "**/testutil/**"
+    - "**/*_generated.go"
+    - "**/*_generated_*.go"
+    - "**/zz_generated*"
+    - "**/mock_*.go"
+    - "**/fake_*.go"
+    - "**/*_fake.go"
+    - "**/*.pb.go"           # protobuf generated code
+  # Probability of including each example type (0.0 - 1.0)
+  weights:
+    code_explanation: 1.0
+    code_completion: 0.85    # key capability for a coder model
+    type_documentation: 0.95 # Go is heavily type-driven
+    package_overview: 0.6    # less important than individual units
+    spec_explanation: 0.9    # some spec sections are repetitive
+
+# External Golang datasets (publicly available).
+# Requires: pip install datasets   (for type: huggingface)
+# Leave empty list to skip.
+golang_datasets:
+  # 305K Go conversation examples (MIT, no auth required)
+  - name: golang-coder
+    type: huggingface
+    dataset_id: smcleod/golang-coder
+    split: train
+    format: messages      # messages: [{role, content}] → ShareGPT
+    max_samples: 50000
+
+  # 2K Go Q&A pairs (Apache 2.0, no auth required)
+  - name: golang-qa
+    type: huggingface
+    dataset_id: ExAi/Code-Golang-QA-2k
+    split: train
+    format: qa            # question/answer fields
+
+  # CodeSearchNet: disabled — parquet streaming broken on macOS (Bad file descriptor)
+  # - name: code_search_net_go
+  #   type: huggingface
+  #   dataset_id: code_search_net
+  #   subset: go
+  #   split: train
+  #   format: code_search_net
+  #   max_samples: 30000
+
+  # Alternatively, point to a local JSONL file (CodeSearchNet format or ShareGPT format):
+  # - name: my_go_data
+  #   type: jsonl
+  #   path: ./external_data/go_functions.jsonl
+
+# Training (Apple Silicon via mlx-lm)
+training:
+  # 4-bit quantized MLX models from mlx-community on HuggingFace.
+  # With 128GB unified memory, 32B is the recommended sweet spot.
+  # Options:
+  #   mlx-community/Qwen2.5-Coder-7B-Instruct-4bit   (~5 GB)
+  #   mlx-community/Qwen2.5-Coder-14B-Instruct-4bit  (~9 GB)
+  #   mlx-community/Qwen2.5-Coder-32B-Instruct-4bit  (~20 GB) ← recommended
+  #   mlx-community/Qwen2.5-Coder-72B-Instruct-4bit  (~42 GB)
+  base_model: "mlx-community/Qwen3-32B-4bit"
+  output_dir: ./output
+  max_seq_length: 4096  # 8192 OOM on 32B; 4096 fits with batch=2
+  # LoRA
+  lora_r: 32            # rank (doubled for better domain specialization)
+  lora_scale: 6.0       # scale factor (was 16 — too aggressive, risks forgetting)
+  lora_num_layers: 32   # number of transformer layers to apply LoRA to
+  lora_dropout: 0.05    # small dropout prevents overfitting
+  # Training
+  # With ~100k examples at batch=4: 10000 iters ≈ 2 epochs
+  iters: 10000
+  per_device_batch_size: 4  # auto-tuned down if it won't fit in memory
+  learning_rate: 3.0e-5     # standard for LoRA (was 1e-5, too conservative)
+  warmup_steps: 500         # 5% of iters
+  lr_schedule: cosine_decay
+  seed: 42
+  logging_steps: 10
+  eval_steps: 500
+  save_steps: 500
+
+# Export: fuse LoRA adapters into a merged model for deployment
+export:
+  ollama_model_name: "ocm-coder"
+  hf_repo: "piotrjanik/ocm-coder"
+  # GGUF quantization: Q4_K_M ~19GB, Q3_K_M ~14GB, Q2_K ~10GB (32B: quality diff is minor)
+  gguf_quantization: "Q3_K_M"
