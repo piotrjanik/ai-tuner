@@ -51,7 +51,7 @@ def _get_gpu_memory_gb() -> tuple[float, str]:
     if not torch.cuda.is_available():
         raise RuntimeError("No CUDA GPU detected — this script requires an NVIDIA GPU")
     props = torch.cuda.get_device_properties(0)
-    return props.total_mem / (1 << 30), props.name
+    return props.total_memory / (1 << 30), props.name
 
 
 def auto_tune(cfg_batch: int, cfg_seq: int, cfg_grad_ckpt: bool = False) -> dict:
