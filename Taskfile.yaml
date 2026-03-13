@@ -53,6 +53,29 @@ tasks:
     cmds:
       - "nice -n {{.NICE}} {{.PYTHON}} src/train/train.py {{.CLI_ARGS}}"
 
+  train:google:
+    desc: "Train on Google Cloud GPU VM (default: L4). Override: task train:google -- --gpu a100"
+    preconditions:
+      - sh: command -v gcloud
+        msg: "Install gcloud CLI: https://cloud.google.com/sdk/docs/install"
+      - sh: gcloud config get-value project 2>/dev/null | grep -q .
+        msg: "Set GCP project: gcloud config set project YOUR_PROJECT"
+    cmds:
+      - ./scripts/train_google.sh {{.CLI_ARGS}}
+
+  train:vertex:
+    desc: "Train on Vertex AI (default: L4). Override: task train:vertex -- --gpu a100"
+    deps: [data]
+    preconditions:
+      - sh: command -v gcloud
+        msg: "Install gcloud CLI: https://cloud.google.com/sdk/docs/install"
+      - sh: gcloud config get-value project 2>/dev/null | grep -q .
+        msg: "Set GCP project: gcloud config set project YOUR_PROJECT"
+      - sh: test -f data/train.jsonl
+        msg: "Run 'task data' first to prepare training data"
+    cmds:
+      - ./scripts/train_vertex.sh {{.CLI_ARGS}}
+
   export:
     desc: Fuse LoRA adapters into output/merged/ (float16)
     deps: [venv]
@@ -107,6 +130,31 @@ tasks:
     cmds:
       - "{{.PYTHON}} src/inference/inference.py -i"
     interactive: true
+
+  notebook:upload:
+    desc: "Upload training notebook to Vertex AI Workbench instance"
+    vars:
+      GCP_PROJECT:
+        sh: gcloud config get-value project 2>/dev/null
+      REGION: '{{.REGION | default "us-central1"}}'
+      INSTANCE: '{{.INSTANCE | default "training-notebook"}}'
+      GCS_BUCKET: 'gs://{{.GCP_PROJECT}}-notebooks'
+    preconditions:
+      - sh: command -v gcloud
+        msg: "Install gcloud CLI: https://cloud.google.com/sdk/docs/install"
+      - sh: gcloud config get-value project 2>/dev/null | grep -q .
+        msg: "Set GCP project: gcloud config set project YOUR_PROJECT"
+      - sh: test -f notebooks/train_colab.ipynb
+        msg: "Notebook not found: notebooks/train_colab.ipynb"
+    cmds:
+      - echo "Ensuring GCS bucket {{.GCS_BUCKET}} exists..."
+      - gcloud storage buckets create {{.GCS_BUCKET}} --location={{.REGION}} 2>/dev/null || true
+      - echo "Uploading notebook to {{.GCS_BUCKET}}/notebooks/"
+      - gcloud storage cp notebooks/train_colab.ipynb {{.GCS_BUCKET}}/notebooks/train_colab.ipynb
+      - gcloud storage cp config.yaml {{.GCS_BUCKET}}/notebooks/config.yaml
+      - gcloud storage cp -r src/ {{.GCS_BUCKET}}/notebooks/src/
+      - echo "Done. Files uploaded to {{.GCS_BUCKET}}/notebooks/"
+      - echo "Open Vertex AI Workbench in the console and create/open an instance to use the notebook."
 
   clean:
     desc: Remove generated data and model outputs
