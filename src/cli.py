@@ -86,7 +86,7 @@ def train(
     nice:           int          = typer.Option(0,     "--nice",   "-n",  help="CPU priority: 0=normal, 10=polite, 19=background"),
     batch_size:     Optional[int]= typer.Option(None,  "--batch-size", "-b", help="Override batch size (reduce to save memory)"),
     max_seq_length: Optional[int]= typer.Option(None,  "--max-seq-length",   help="Override max sequence length"),
-    cuda:           bool         = typer.Option(False, "--cuda",          help="Use PyTorch+QLoRA (NVIDIA GPU) instead of MLX"),
+    cuda:           bool         = typer.Option(False, "--cuda", "--unsloth", help="Use Unsloth+QLoRA (NVIDIA GPU / Colab) instead of MLX"),
     config:         str          = typer.Option(_CONFIG, "-c", help="Config file"),
 ):
     """[bold]Fine-tune[/bold] with LoRA. Auto-tunes batch/seq to fit available memory."""

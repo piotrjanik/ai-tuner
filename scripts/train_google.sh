@@ -207,6 +207,7 @@ nvidia-smi
 
 echo "── Installing dependencies ──"
 pip install -q \
+    unsloth \
     torch \
     transformers>=4.45.0 \
     peft>=0.13.0 \

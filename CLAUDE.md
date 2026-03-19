@@ -13,7 +13,7 @@ A generic fine-tuning pipeline that trains LLMs (via LoRA/QLoRA) to serve as dom
 python src/cli.py --help
 python src/cli.py data                             # extract training data
 python src/cli.py train --nice 10 --batch-size 2   # fine-tune (throttled, Apple Silicon)
-python src/cli.py train --cuda                     # fine-tune (NVIDIA GPU via QLoRA)
+python src/cli.py train --unsloth                  # fine-tune (Unsloth on NVIDIA GPU / Colab)
 python src/cli.py export                           # fuse adapters → output/merged/
 python src/cli.py export-gguf --quant Q4_K_M       # GGUF for Ollama/LM Studio
 python src/cli.py push --gguf                      # push GGUF to HuggingFace
@@ -35,7 +35,11 @@ task clean          # Remove data/ and output/
 task clean:all      # Remove everything including .venv and repos/
 ```
 
-**Platform**: Data prep runs anywhere. Training works on Apple Silicon (MLX) or NVIDIA GPUs (PyTorch+QLoRA). Export and inference require macOS with Apple Silicon.
+**Platform**: Data prep runs anywhere. Training has two backends:
+- **MLX** (default) — local Apple Silicon (M1–M4)
+- **Unsloth** (`--unsloth` / `--cuda`) — NVIDIA GPUs, Google Colab, cloud VMs
+
+Export auto-detects adapter format (MLX vs PEFT). GGUF conversion and inference work on both.
 
 ## Architecture
 
@@ -72,8 +76,8 @@ Three source types dispatched by `type` field in `config.yaml`:
 
 Two backends, same config.yaml and data format:
 
-- **`src/train/train.py`** — Apple Silicon via mlx-lm. Default for `python src/cli.py train`.
-- **`src/train/train_cuda.py`** — NVIDIA GPUs via PyTorch + PEFT (QLoRA). Use `python src/cli.py train --cuda` or the Colab notebook at `notebooks/train_colab.ipynb`.
+- **`src/train/train.py`** — Apple Silicon via mlx-lm. Default for `python src/cli.py train`. Uses `training.base_model` from config.
+- **`src/train/train_cuda.py`** — NVIDIA GPUs via Unsloth + QLoRA. Use `python src/cli.py train --unsloth` or the Colab notebook at `notebooks/train_colab.ipynb`. Uses `training.cuda_model` from config.
 
 Both auto-tune batch_size, max_seq_length, and gradient checkpointing based on available GPU memory. Override with `--batch-size` / `--max-seq-length` or disable with `--no-auto-tune`.
 
@@ -83,9 +87,11 @@ Everything domain-specific lives in `config.yaml`:
 - `system_prompt` — injected into every training example and inference session
 - `sources` — Go repos, spec repos to clone and parse
 - `golang_datasets` — external HuggingFace datasets
-- `training.base_model` — which model to fine-tune
+- `training.base_model` — MLX model for local training (Apple Silicon)
+- `training.cuda_model` — Unsloth model for cloud training (NVIDIA GPUs)
 - `export.ollama_model_name` / `export.hf_repo` — deployment targets
 
 ## Dependencies
 
-All in `src/requirements.txt`. Install with `task venv` (uses **uv**).
+- **Local (MLX)**: `src/requirements.txt` — install with `task venv` (uses **uv**)
+- **Cloud (Unsloth)**: `src/requirements-cuda.txt` — installed by notebook / cloud scripts

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Fine-tune a model using PyTorch + PEFT (QLoRA) on NVIDIA GPUs.
+Fine-tune a model using Unsloth + QLoRA on NVIDIA GPUs.
 
-Drop-in replacement for train.py (MLX) — works on Google Colab, RunPod, Lambda, etc.
+Uses Unsloth's FastLanguageModel for 2x faster training and 70% less VRAM
+compared to standard transformers. Works on Google Colab, Vertex AI, RunPod, etc.
+
 Reads the same config.yaml and data/{train,val}.jsonl produced by prepare_data.py.
 
 Usage:
@@ -17,99 +19,13 @@ from pathlib import Path
 import torch
 import yaml
 from datasets import Dataset
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    TrainingArguments,
-)
+from transformers import TrainingArguments
 from trl import SFTTrainer
-
-# ---------------------------------------------------------------------------
-# GPU memory detection & auto-tuning
-# ---------------------------------------------------------------------------
-
-# Base model in 4-bit ≈ 20 GB VRAM.  Each batch×seq unit adds roughly 0.5 GB
-# on an 80-layer model with LoRA.  These are conservative estimates.
-_MODEL_BASE_GB = 20.0
-
-
-def _estimate_peak_gb(batch: int, seq: int, grad_ckpt: bool = False) -> float:
-    """Rough peak VRAM estimate for QLoRA on Qwen3-32B-4bit."""
-    per_sample = (seq / 4096) * 2.5  # ~2.5 GB per sample at seq=4096
-    activations = batch * per_sample
-    optimizer = 1.5  # AdamW states for LoRA params
-    peak = _MODEL_BASE_GB + activations + optimizer
-    if grad_ckpt:
-        peak = _MODEL_BASE_GB + (peak - _MODEL_BASE_GB) * 0.55
-    return peak
-
-
-def _get_gpu_memory_gb() -> tuple[float, str]:
-    """Return (total_vram_gb, gpu_name) for the first CUDA device."""
-    if not torch.cuda.is_available():
-        raise RuntimeError("No CUDA GPU detected — this script requires an NVIDIA GPU")
-    props = torch.cuda.get_device_properties(0)
-    return props.total_memory / (1 << 30), props.name
-
-
-def auto_tune(cfg_batch: int, cfg_seq: int, cfg_grad_ckpt: bool = False) -> dict:
-    """Pick batch_size, max_seq_length, grad_checkpoint that fit in GPU VRAM."""
-    total_gb, device = _get_gpu_memory_gb()
-    budget_gb = total_gb * 0.90  # tighter margin than unified memory
-
-    candidates = [
-        (cfg_batch, cfg_seq, False),
-        (cfg_batch, cfg_seq, True),
-        (max(cfg_batch // 2, 1), cfg_seq, False),
-        (max(cfg_batch // 2, 1), cfg_seq, True),
-        (1, cfg_seq, False),
-        (1, cfg_seq, True),
-        (1, cfg_seq // 2, False),
-        (1, cfg_seq // 2, True),
-        (1, 1024, True),
-    ]
-
-    for batch, seq, ckpt in candidates:
-        if seq < 512:
-            continue
-        est = _estimate_peak_gb(batch, seq, ckpt)
-        if est <= budget_gb:
-            changes = []
-            if batch != cfg_batch:
-                changes.append(f"batch_size {cfg_batch}->{batch}")
-            if seq != cfg_seq:
-                changes.append(f"max_seq_length {cfg_seq}->{seq}")
-            if ckpt and not cfg_grad_ckpt:
-                changes.append("enabled grad_checkpoint")
-            return {
-                "batch_size": batch,
-                "max_seq_length": seq,
-                "grad_checkpoint": ckpt,
-                "peak_est_gb": round(est, 1),
-                "budget_gb": round(budget_gb, 1),
-                "total_gb": round(total_gb, 1),
-                "device": device,
-                "reason": ", ".join(changes) if changes else "config values fit",
-            }
-
-    return {
-        "batch_size": 1, "max_seq_length": 1024, "grad_checkpoint": True,
-        "peak_est_gb": round(_estimate_peak_gb(1, 1024, True), 1),
-        "budget_gb": round(budget_gb, 1), "total_gb": round(total_gb, 1),
-        "device": device,
-        "reason": "WARNING: even minimum settings may exceed VRAM",
-    }
-
+from unsloth import FastLanguageModel
 
 # ---------------------------------------------------------------------------
 # Data loading (ShareGPT JSONL → HF Dataset)
 # ---------------------------------------------------------------------------
-
-# Map from the Qwen3 chat template.  Qwen3 uses ChatML:
-#   <|im_start|>system\n...<|im_end|>\n<|im_start|>user\n...<|im_end|>\n...
-# The tokenizer.apply_chat_template handles this automatically.
 
 def load_sharegpt_jsonl(path: Path) -> Dataset:
     """Load ShareGPT-format JSONL into an HF Dataset with 'messages' column."""
@@ -130,16 +46,6 @@ def load_sharegpt_jsonl(path: Path) -> Dataset:
 # Main
 # ---------------------------------------------------------------------------
 
-# HuggingFace model IDs for CUDA (full-precision, quantized at load time).
-# The MLX config uses "mlx-community/Qwen3-32B-4bit" which is MLX-specific.
-_MLX_TO_HF = {
-    "mlx-community/Qwen3-32B-4bit": "Qwen/Qwen3-32B",
-    "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit": "Qwen/Qwen2.5-Coder-32B-Instruct",
-    "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit": "Qwen/Qwen2.5-Coder-14B-Instruct",
-    "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit": "Qwen/Qwen2.5-Coder-7B-Instruct",
-}
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.yaml")
@@ -147,7 +53,6 @@ def main():
                     help="Continue training from existing adapter checkpoint")
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--max-seq-length", type=int, default=None)
-    ap.add_argument("--no-auto-tune", action="store_true")
     args = ap.parse_args()
 
     with open(args.config) as f:
@@ -155,30 +60,39 @@ def main():
 
     tc = cfg["training"]
     dc = cfg["data"]
+    ec = cfg.get("export", {})
 
-    # Resolve HF model ID from the MLX model name
-    mlx_model = tc["base_model"]
-    hf_model = _MLX_TO_HF.get(mlx_model, mlx_model)
-    print(f"Model: {hf_model} (from config: {mlx_model})")
+    # Resolve model ID — prefer cuda_model, fall back to base_model
+    model_id = tc.get("cuda_model") or tc["base_model"]
+    print(f"Model: {model_id}")
 
     cfg_batch = args.batch_size or tc.get("per_device_batch_size", 4)
     cfg_seq = args.max_seq_length or tc.get("max_seq_length", 4096)
-    cfg_grad_ckpt = tc.get("grad_checkpoint", False)
 
-    # Auto-tune
-    user_overrode_both = args.batch_size is not None and args.max_seq_length is not None
-    if not args.no_auto_tune and not user_overrode_both:
-        tuned = auto_tune(cfg_batch, cfg_seq, cfg_grad_ckpt)
-        print(f"GPU: {tuned['total_gb']:.0f} GB ({tuned['device']}), "
-              f"budget: {tuned['budget_gb']:.0f} GB, "
-              f"est. peak: {tuned['peak_est_gb']:.0f} GB")
-        if tuned["reason"] != "config values fit":
-            print(f"Auto-tuned: {tuned['reason']}")
-        else:
-            print("Auto-tune: config values fit within VRAM budget")
-        cfg_batch = tuned["batch_size"]
-        cfg_seq = tuned["max_seq_length"]
-        cfg_grad_ckpt = tuned["grad_checkpoint"]
+    # Load model with Unsloth (handles quantization automatically)
+    print(f"Loading {model_id} with Unsloth...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_id,
+        max_seq_length=cfg_seq,
+        dtype=None,          # auto-detect bf16/fp16
+        load_in_4bit=True,
+    )
+
+    # LoRA config via Unsloth
+    lora_r = tc.get("lora_r", 16)
+    lora_alpha = int(tc.get("lora_scale", 20.0) * lora_r)
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=lora_r,
+        lora_alpha=lora_alpha,
+        lora_dropout=tc.get("lora_dropout", 0.0),
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        bias="none",
+        use_gradient_checkpointing="unsloth",  # 30% less VRAM than standard
+        random_state=tc.get("seed", 42),
+        max_seq_length=cfg_seq,
+    )
 
     # Load data
     data_dir = Path(dc["output_dir"])
@@ -190,46 +104,7 @@ def main():
     val_ds = load_sharegpt_jsonl(data_dir / "val.jsonl")
     print(f"Train: {len(train_ds)} examples, Val: {len(val_ds)} examples")
 
-    # Quantization config (4-bit NF4 — matches the MLX 4-bit model quality)
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
-
-    # Load model + tokenizer
-    print(f"Loading {hf_model} in 4-bit...")
-    tokenizer = AutoTokenizer.from_pretrained(hf_model, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModelForCausalLM.from_pretrained(
-        hf_model,
-        quantization_config=bnb_config,
-        device_map="auto",
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2" if torch.cuda.get_device_capability()[0] >= 8 else "eager",
-    )
-    model = prepare_model_for_kbit_training(model)
-
-    # LoRA config — mirror the MLX settings
-    lora_r = tc.get("lora_r", 16)
-    lora_alpha = tc.get("lora_scale", 20.0) * lora_r  # mlx scale = alpha/rank
-    peft_config = LoraConfig(
-        r=lora_r,
-        lora_alpha=int(lora_alpha),
-        lora_dropout=tc.get("lora_dropout", 0.0),
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(model, peft_config)
-    model.print_trainable_parameters()
-
-    # Compute max_steps and warmup from iters (mlx-lm "iters" = steps)
+    # Training args
     max_steps = tc.get("iters", 1000)
     warmup_steps = tc.get("warmup_steps", 0)
 
@@ -246,24 +121,24 @@ def main():
         eval_strategy="steps",
         save_steps=tc.get("save_steps", 200),
         save_total_limit=3,
-        gradient_checkpointing=cfg_grad_ckpt,
-        gradient_accumulation_steps=max(4 // cfg_batch, 1),  # effective batch ~4
-        bf16=True,
+        gradient_accumulation_steps=max(4 // cfg_batch, 1),
+        optim="adamw_8bit",
+        fp16=not torch.cuda.is_bf16_supported(),
+        bf16=torch.cuda.is_bf16_supported(),
         seed=tc.get("seed", 42),
         report_to="none",
         remove_unused_columns=False,
         max_grad_norm=1.0,
+        dataloader_pin_memory=False,
     )
 
-    # SFTTrainer handles chat template formatting automatically
     trainer = SFTTrainer(
         model=model,
-        args=training_args,
+        tokenizer=tokenizer,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        processing_class=tokenizer,
-        peft_config=peft_config,
         max_seq_length=cfg_seq,
+        args=training_args,
     )
 
     if args.resume:
@@ -272,10 +147,18 @@ def main():
     else:
         trainer.train()
 
-    # Save final adapter
+    # Save adapter
     model.save_pretrained(str(adapter_path))
     tokenizer.save_pretrained(str(adapter_path))
     print(f"\nAdapters saved to {adapter_path}")
+
+    # Push to HuggingFace if configured
+    hf_repo = ec.get("hf_repo", "")
+    if hf_repo:
+        print(f"\nTo push adapters to HuggingFace:")
+        print(f"  python src/cli.py push")
+        print(f"\nTo push merged GGUF model:")
+        print(f"  python src/cli.py push --gguf")
 
 
 if __name__ == "__main__":

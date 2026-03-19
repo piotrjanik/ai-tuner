@@ -133,16 +133,26 @@ golang_datasets:
   #   type: jsonl
   #   path: ./external_data/go_functions.jsonl
 
-# Training (Apple Silicon via mlx-lm)
+# Training — two backends, same LoRA hyperparameters
+#
+#   MLX     (default)  — local Apple Silicon (M1–M4).  `python src/cli.py train`
+#   Unsloth (--cuda)   — NVIDIA GPUs / Colab / cloud.  `python src/cli.py train --cuda`
 training:
-  # 4-bit quantized MLX models from mlx-community on HuggingFace.
-  # With 128GB unified memory, 32B is the recommended sweet spot.
-  # Options:
+  # ── Models ──────────────────────────────────────────────────────────────────
+  # Each backend needs its own model ID (different quantisation formats).
+  #
+  # MLX  — 4-bit quantized models from mlx-community (Apple Silicon only)
   #   mlx-community/Qwen2.5-Coder-7B-Instruct-4bit   (~5 GB)
   #   mlx-community/Qwen2.5-Coder-14B-Instruct-4bit  (~9 GB)
   #   mlx-community/Qwen2.5-Coder-32B-Instruct-4bit  (~20 GB) ← recommended
   #   mlx-community/Qwen2.5-Coder-72B-Instruct-4bit  (~42 GB)
   base_model: "mlx-community/Qwen3-32B-4bit"
+
+  # Unsloth — pre-quantized 4-bit models for NVIDIA GPUs
+  #   unsloth/Qwen2.5-Coder-7B-Instruct-bnb-4bit
+  #   unsloth/Qwen2.5-Coder-14B-Instruct-bnb-4bit
+  #   unsloth/Qwen2.5-Coder-32B-Instruct-bnb-4bit
+  cuda_model: "unsloth/Qwen3-32B-bnb-4bit"
   output_dir: ./output
   max_seq_length: 4096  # 8192 OOM on 32B; 4096 fits with batch=2
   # LoRA

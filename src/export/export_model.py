@@ -21,6 +21,55 @@ from pathlib import Path
 import yaml
 
 
+def _is_peft_adapter(adapter_path: Path) -> bool:
+    """Return True if adapters are PEFT format (from Unsloth/transformers)."""
+    return (adapter_path / "adapter_config.json").exists()
+
+
+def _fuse_mlx(base_model: str, adapter_path: Path, merged_path: Path,
+              gguf_path: Path | None = None):
+    """Fuse MLX LoRA adapters using mlx_lm."""
+    if gguf_path:
+        cmd = [
+            sys.executable, "-m", "mlx_lm", "fuse",
+            "--model",        base_model,
+            "--adapter-path", str(adapter_path),
+            "--export-gguf",
+            "--gguf-path",    str(gguf_path),
+        ]
+    else:
+        cmd = [
+            sys.executable, "-m", "mlx_lm", "fuse",
+            "--model",        base_model,
+            "--adapter-path", str(adapter_path),
+            "--save-path",    str(merged_path),
+            "--dequantize",   # save as float16 for GGUF compatibility
+        ]
+    print(" ".join(cmd) + "\n")
+    subprocess.run(cmd, check=True)
+
+
+def _fuse_peft(base_model: str, adapter_path: Path, merged_path: Path):
+    """Fuse PEFT LoRA adapters (from Unsloth) using transformers."""
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    print(f"Loading base model {base_model}...")
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model, torch_dtype="auto", device_map="cpu",
+    )
+    print(f"Loading PEFT adapters from {adapter_path}...")
+    model = PeftModel.from_pretrained(model, str(adapter_path))
+    print("Merging adapters...")
+    model = model.merge_and_unload()
+
+    print(f"Saving merged model to {merged_path}...")
+    merged_path.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(str(merged_path))
+    tokenizer = AutoTokenizer.from_pretrained(base_model)
+    tokenizer.save_pretrained(str(merged_path))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config.yaml")
@@ -38,27 +87,35 @@ def main():
     adapter_path = output_dir / "adapters"
     merged_path = output_dir / "merged"
     model_name = ec.get("ollama_model_name", "my-model")
+    is_peft = _is_peft_adapter(adapter_path)
 
     if not adapter_path.exists():
-        print(f"No adapters found at {adapter_path}. Run train.py first.")
+        print(f"No adapters found at {adapter_path}. Run train first.")
         sys.exit(1)
+
+    # Resolve which base model was used for training
+    if is_peft:
+        base_model = tc.get("cuda_model") or tc["base_model"]
+        print(f"Detected PEFT adapters (Unsloth backend), base model: {base_model}")
+    else:
+        base_model = tc["base_model"]
+        print(f"Detected MLX adapters, base model: {base_model}")
 
     if args.gguf:
         gguf_path = output_dir / "gguf" / f"{model_name}.gguf"
         gguf_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            sys.executable, "-m", "mlx_lm", "fuse",
-            "--model",        tc["base_model"],
-            "--adapter-path", str(adapter_path),
-            "--export-gguf",
-            "--gguf-path",    str(gguf_path),
-        ]
-        print(f"Exporting GGUF → {gguf_path} ...")
-        print(" ".join(cmd) + "\n")
-        subprocess.run(cmd, check=True)
-        print(f"\nGGUF saved to {gguf_path}")
-        _print_ollama_instructions(gguf_path, model_name,
-                                   cfg.get("system_prompt", ""))
+        if is_peft:
+            # PEFT → merge first, then convert with llama.cpp
+            print(f"Fusing PEFT adapters into {merged_path} ...")
+            _fuse_peft(base_model, adapter_path, merged_path)
+            print(f"\nMerged model saved to {merged_path}")
+            print(f"Convert to GGUF with: task export:gguf")
+        else:
+            print(f"Exporting GGUF → {gguf_path} ...")
+            _fuse_mlx(base_model, adapter_path, merged_path, gguf_path=gguf_path)
+            print(f"\nGGUF saved to {gguf_path}")
+            _print_ollama_instructions(gguf_path, model_name,
+                                       cfg.get("system_prompt", ""))
 
     elif args.push:
         hf_repo = ec.get("hf_repo", "")
@@ -66,11 +123,9 @@ def main():
             print("Set export.hf_repo in config.yaml first (e.g. 'your-username/my-model')")
             sys.exit(1)
         if not adapter_path.exists():
-            print(f"No adapters found at {adapter_path}. Run train.py first.")
+            print(f"No adapters found at {adapter_path}. Run train first.")
             sys.exit(1)
-        # Push only the adapters (few hundred MB), not the full merged model (65GB+).
-        # Users load them with: load("<base_model>", adapter_path="<hf_repo>")
-        _write_adapter_readme(adapter_path, tc["base_model"], hf_repo)
+        _write_adapter_readme(adapter_path, base_model, hf_repo, is_peft=is_peft)
         cmd = [
             sys.executable, "-m", "huggingface_hub.cli.hf",
             "upload", hf_repo, str(adapter_path), ".",
@@ -80,31 +135,55 @@ def main():
         print(" ".join(cmd) + "\n")
         subprocess.run(cmd, check=True)
         print(f"\nAdapters available at: https://huggingface.co/{hf_repo}")
-        print(f"\nLoad with mlx-lm:")
-        print(f'  from mlx_lm import load')
-        print(f'  model, tok = load("{tc["base_model"]}", adapter_path="{hf_repo}")')
+        if is_peft:
+            print(f"\nLoad with PEFT:")
+            print(f'  from peft import PeftModel')
+            print(f'  model = PeftModel.from_pretrained(base_model, "{hf_repo}")')
+        else:
+            print(f"\nLoad with mlx-lm:")
+            print(f'  from mlx_lm import load')
+            print(f'  model, tok = load("{base_model}", adapter_path="{hf_repo}")')
 
     else:
-        # Default: fuse adapters into float16 merged model
-        cmd = [
-            sys.executable, "-m", "mlx_lm", "fuse",
-            "--model",        tc["base_model"],
-            "--adapter-path", str(adapter_path),
-            "--save-path",    str(merged_path),
-            "--dequantize",   # save as float16 for GGUF compatibility
-        ]
+        # Default: fuse adapters into merged model
         print(f"Fusing adapters into {merged_path} ...")
-        print(" ".join(cmd) + "\n")
-        subprocess.run(cmd, check=True)
+        if is_peft:
+            _fuse_peft(base_model, adapter_path, merged_path)
+        else:
+            _fuse_mlx(base_model, adapter_path, merged_path)
         print(f"\nMerged model saved to {merged_path}")
         print("\nNext steps:")
         print(f"  task export:gguf   # convert to GGUF for Ollama")
         print(f"  task push:hf       # push to HuggingFace Hub")
 
 
-def _write_adapter_readme(adapter_path: Path, base_model: str, hf_repo: str):
+def _write_adapter_readme(adapter_path: Path, base_model: str, hf_repo: str,
+                          is_peft: bool = False):
     readme = adapter_path / "README.md"
-    readme.write_text(f"""---
+    if is_peft:
+        readme.write_text(f"""---
+base_model: {base_model}
+library_name: peft
+tags: [peft, lora, fine-tune, unsloth]
+---
+
+# {hf_repo.split("/")[-1]}
+
+LoRA adapters fine-tuned from [{base_model}](https://huggingface.co/{base_model}) using Unsloth.
+
+## Usage
+
+```python
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+base = AutoModelForCausalLM.from_pretrained("{base_model}")
+model = PeftModel.from_pretrained(base, "{hf_repo}")
+tokenizer = AutoTokenizer.from_pretrained("{base_model}")
+```
+""")
+    else:
+        readme.write_text(f"""---
 base_model: {base_model}
 library_name: mlx
 tags: [mlx, lora, fine-tune]

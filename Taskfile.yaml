@@ -48,7 +48,7 @@ tasks:
       - "{{.PYTHON}} src/data/prepare_data.py --stats-only"
 
   train:
-    desc: "Fine-tune with mlx-lm. Throttle: task train NICE=10 -- --batch-size 1 --max-seq-length 2048"
+    desc: "Fine-tune with MLX (local). For Unsloth (cloud): use notebooks/train_colab.ipynb or task train:google"
     deps: [data, venv]
     cmds:
       - "nice -n {{.NICE}} {{.PYTHON}} src/train/train.py {{.CLI_ARGS}}"

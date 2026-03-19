@@ -19,6 +19,7 @@ cd /workspace/project
 
 echo "── Installing dependencies ──"
 pip install -q \
+    unsloth \
     transformers">=4.45.0" \
     peft">=0.13.0" \
     trl">=0.12.0" \
