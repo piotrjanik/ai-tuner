@@ -13,32 +13,30 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
+
+# Disable wandb before importing trl/transformers (broken wandb on Colab crashes imports)
+os.environ["WANDB_DISABLED"] = "true"
 
 import torch
 import yaml
 from datasets import Dataset
-from transformers import TrainingArguments
-from trl import SFTTrainer
+from trl import SFTConfig, SFTTrainer
 from unsloth import FastLanguageModel
+from unsloth.chat_templates import train_on_responses_only, standardize_sharegpt
 
 # ---------------------------------------------------------------------------
 # Data loading (ShareGPT JSONL → HF Dataset)
 # ---------------------------------------------------------------------------
 
 def load_sharegpt_jsonl(path: Path) -> Dataset:
-    """Load ShareGPT-format JSONL into an HF Dataset with 'messages' column."""
-    role_map = {"system": "system", "human": "user", "gpt": "assistant"}
+    """Load ShareGPT-format JSONL into an HF Dataset with 'conversations' column."""
     rows = []
     with open(path) as f:
         for line in f:
-            ex = json.loads(line)
-            messages = [
-                {"role": role_map.get(t["from"], t["from"]), "content": t["value"]}
-                for t in ex["conversations"]
-            ]
-            rows.append({"messages": messages})
+            rows.append(json.loads(line))
     return Dataset.from_list(rows)
 
 
@@ -104,41 +102,60 @@ def main():
     val_ds = load_sharegpt_jsonl(data_dir / "val.jsonl")
     print(f"Train: {len(train_ds)} examples, Val: {len(val_ds)} examples")
 
-    # Training args
+    # Standardize ShareGPT format and apply chat template
+    train_ds = standardize_sharegpt(train_ds)
+    val_ds = standardize_sharegpt(val_ds)
+
+    def formatting_func(examples):
+        convos = examples["conversations"]
+        texts = [tokenizer.apply_chat_template(
+            convo, tokenize=False, add_generation_prompt=False
+        ) for convo in convos]
+        return {"text": texts}
+
+    train_ds = train_ds.map(formatting_func, batched=True)
+    val_ds = val_ds.map(formatting_func, batched=True)
+
+    # Training config
     max_steps = tc.get("iters", 1000)
     warmup_steps = tc.get("warmup_steps", 0)
-
-    training_args = TrainingArguments(
-        output_dir=str(adapter_path),
-        max_steps=max_steps,
-        per_device_train_batch_size=cfg_batch,
-        per_device_eval_batch_size=cfg_batch,
-        learning_rate=tc.get("learning_rate", 2e-4),
-        lr_scheduler_type="cosine" if tc.get("lr_schedule") == "cosine_decay" else "linear",
-        warmup_steps=warmup_steps,
-        logging_steps=tc.get("logging_steps", 10),
-        eval_steps=tc.get("eval_steps", 200),
-        eval_strategy="steps",
-        save_steps=tc.get("save_steps", 200),
-        save_total_limit=3,
-        gradient_accumulation_steps=max(4 // cfg_batch, 1),
-        optim="adamw_8bit",
-        fp16=not torch.cuda.is_bf16_supported(),
-        bf16=torch.cuda.is_bf16_supported(),
-        seed=tc.get("seed", 42),
-        report_to="none",
-        remove_unused_columns=False,
-        max_grad_norm=1.0,
-        dataloader_pin_memory=False,
-    )
 
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        max_seq_length=cfg_seq,
-        args=training_args,
+        args=SFTConfig(
+            output_dir=str(adapter_path),
+            max_seq_length=cfg_seq,
+            max_steps=max_steps,
+            per_device_train_batch_size=cfg_batch,
+            per_device_eval_batch_size=cfg_batch,
+            learning_rate=tc.get("learning_rate", 2e-4),
+            lr_scheduler_type="cosine" if tc.get("lr_schedule") == "cosine_decay" else "linear",
+            warmup_steps=warmup_steps,
+            logging_steps=tc.get("logging_steps", 10),
+            eval_steps=tc.get("eval_steps", 200),
+            eval_strategy="steps",
+            save_steps=tc.get("save_steps", 200),
+            save_total_limit=3,
+            gradient_accumulation_steps=max(4 // cfg_batch, 1),
+            optim="adamw_8bit",
+            weight_decay=0.001,
+            fp16=not torch.cuda.is_bf16_supported(),
+            bf16=torch.cuda.is_bf16_supported(),
+            seed=tc.get("seed", 42),
+            report_to="none",
+            max_grad_norm=1.0,
+            dataloader_pin_memory=False,
+        ),
+    )
+
+    # Train only on assistant responses (mask instruction/user tokens)
+    trainer = train_on_responses_only(
+        trainer,
+        instruction_part="<|im_start|>user\n",
+        response_part="<|im_start|>assistant\n",
     )
 
     if args.resume:

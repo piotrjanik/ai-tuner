@@ -1,15 +1,20 @@
 # Dependencies for CUDA training (Colab, Vertex AI, RunPod, Lambda, etc.)
-# Note: torch, datasets, tqdm, pyyaml, huggingface_hub are typically
-# pre-installed on Colab/Vertex. Listing only what's missing or needs upgrading.
 #
-# IMPORTANT: transformers and trl versions must match what Unsloth expects.
-# Check Unsloth's official notebooks for the latest pinned versions:
+# IMPORTANT: On Colab/cloud, use the install commands in notebooks/train_colab.ipynb
+# or scripts/train_google.sh instead of pip install -r. They use uv and install
+# torch + unsloth together to avoid CUDA torch being replaced with CPU torch.
+#
+# Pinned versions must match Unsloth's official notebooks:
 # https://github.com/unslothai/notebooks
+torch>=2.8.0
+triton>=3.4.0
 unsloth                   # 2x faster LoRA fine-tuning on NVIDIA GPUs
+unsloth_zoo
 transformers==4.56.2      # pinned — Unsloth requires exact version
 trl==0.22.2               # pinned — install with --no-deps to avoid conflicts
+tokenizers
 peft>=0.13.0
 bitsandbytes>=0.44.0
 accelerate>=1.0.0
-xformers
+datasets>=2.14.0
 typer>=0.12.0
