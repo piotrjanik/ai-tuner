@@ -1,0 +1,79 @@
+# SkyPilot config for Unsloth QLoRA training on any cloud.
+#
+# Usage:
+#   task train:sky                             # launch with defaults (L4)
+#   task train:sky -- --gpus A100:1            # use A100
+#   sky launch -c ai-tuner sky/train.yaml      # direct skypilot
+#   sky down ai-tuner                          # tear down cluster
+#
+# Adapters are saved to the cloud bucket mounted at /outputs.
+# After training: sky storage ls
+
+name: ai-tuner
+
+resources:
+  accelerators: L4:1
+  disk_size: 200
+  cloud: gcp
+
+workdir: .
+
+file_mounts:
+  /outputs:
+    name: ai-tuner-outputs
+    mode: MOUNT
+
+setup: |
+  set -ex
+
+  # Wait for NVIDIA drivers (Deep Learning VMs install on first boot)
+  for i in $(seq 1 30); do
+    nvidia-smi && break
+    echo "Waiting for NVIDIA drivers... ($i)"
+    sleep 10
+  done
+  nvidia-smi
+
+  # Create venv with system site packages (inherits CUDA torch)
+  if [ ! -d ~/venv ]; then
+    python3 -m venv ~/venv --system-site-packages
+  fi
+  source ~/venv/bin/activate
+
+  # Install torch + unsloth together
+  pip install -q \
+      "torch>=2.8.0" "triton>=3.4.0" torchvision bitsandbytes \
+      "unsloth @ git+https://github.com/unslothai/unsloth" \
+      "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo"
+
+  # Pin exact versions (--no-deps to avoid conflicts)
+  pip install -q --no-deps transformers==4.56.2 tokenizers trl==0.22.2
+
+  # Project deps
+  pip install -q \
+      "peft>=0.13.0" "accelerate>=1.0.0" "typer>=0.12.0" \
+      pyyaml tqdm "huggingface_hub[cli]" "datasets>=3.4.1,<4.4.0" xformers
+
+  # Flash Attention (optional)
+  timeout 120 pip install -q flash-attn --no-build-isolation 2>/dev/null || true
+
+  # Verify
+  python3 -c "import torch; assert torch.cuda.is_available(); print(f'torch {torch.__version__}, GPU: {torch.cuda.get_device_name(0)}')"
+  python3 -c "import unsloth; print('unsloth OK')"
+
+run: |
+  set -ex
+  source ~/venv/bin/activate
+
+  echo "── Preparing training data ──"
+  python3 src/data/prepare_data.py --config config.yaml
+
+  echo "── Starting training ──"
+  python3 src/train/train_cuda.py --config config.yaml
+
+  echo "── Training complete ──"
+  ls -lh output/adapters/
+
+  # Copy adapters to mounted bucket
+  cp -r output/adapters/* /outputs/
+  echo "Adapters saved to /outputs (cloud bucket: ai-tuner-outputs)"

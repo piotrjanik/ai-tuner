@@ -122,7 +122,7 @@ def main():
 
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=train_ds,
         eval_dataset=val_ds,
         max_seq_length=cfg_seq,
