@@ -125,7 +125,6 @@ def main():
         processing_class=tokenizer,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        max_seq_length=cfg_seq,
         args=SFTConfig(
             output_dir=str(adapter_path),
             dataset_text_field="text",
