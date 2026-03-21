@@ -108,21 +108,21 @@ def main():
     # ── Trainer ─────────────────────────────────────────────────────────────
     max_steps = tc.get("iters", 10000)
 
-    # Auto-tune batch size based on GPU memory
-    # 32B 4-bit: ~20GB model + ~55GB activations at batch=4/seq=4096 → OOM on 80GB
-    # Safe: batch=1 with grad_accum to keep effective batch size
+    # Auto-tune: 32B 4-bit + 151K vocab needs careful memory management
+    # At seq=2048: ~20GB model + ~25GB activations/grads per batch item
+    # At seq=4096: doubles activation memory → OOM on 80GB even at batch=1
     gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
     effective_batch = batch_size
-    if not args.batch_size:  # only auto-tune if user didn't explicitly set it
-        if gpu_mem_gb <= 80:
+    if not args.batch_size:
+        if gpu_mem_gb <= 48:
             batch_size = 1
-        elif gpu_mem_gb <= 48:
-            batch_size = 1
-            if max_seq_len > 2048:
-                max_seq_len = 2048
-                print(f"Auto-tuned max_seq_length to {max_seq_len} (GPU: {gpu_mem_gb:.0f} GB)")
+            max_seq_len = min(max_seq_len, 1024)
+        elif gpu_mem_gb <= 80:
+            batch_size = 2
+            max_seq_len = min(max_seq_len, 2048)
         if batch_size != effective_batch:
-            print(f"Auto-tuned batch_size {effective_batch} → {batch_size} (GPU: {gpu_mem_gb:.0f} GB)")
+            print(f"Auto-tuned: batch {effective_batch}→{batch_size}, "
+                  f"seq_len→{max_seq_len} (GPU: {gpu_mem_gb:.0f} GB)")
     grad_accum = max(effective_batch // batch_size, 1)
 
     training_args = TrainingArguments(
