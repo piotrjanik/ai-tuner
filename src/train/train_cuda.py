@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 os.environ["WANDB_DISABLED"] = "true"
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import yaml
@@ -107,16 +108,21 @@ def main():
     # ── Trainer ─────────────────────────────────────────────────────────────
     max_steps = tc.get("iters", 10000)
 
-    # Auto-tune: halve batch size until it fits, compensate with grad accumulation
+    # Auto-tune batch size based on GPU memory
+    # 32B 4-bit: ~20GB model + ~55GB activations at batch=4/seq=4096 → OOM on 80GB
+    # Safe: batch=1 with grad_accum to keep effective batch size
     gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
     effective_batch = batch_size
-    # 32B 4-bit model needs ~20GB base + ~15GB per batch item at seq_len=4096
-    # On 80GB H100 with 32B: batch=2 is safe, batch=4 OOMs
-    if gpu_mem_gb < 160:  # single GPU (not multi-GPU with >160GB total)
-        max_batch_for_mem = max(1, int((gpu_mem_gb - 25) / 14))
-        if batch_size > max_batch_for_mem:
-            batch_size = max(1, max_batch_for_mem)
-            print(f"Auto-tuned batch_size to {batch_size} (GPU: {gpu_mem_gb:.0f} GB)")
+    if not args.batch_size:  # only auto-tune if user didn't explicitly set it
+        if gpu_mem_gb <= 80:
+            batch_size = 1
+        elif gpu_mem_gb <= 48:
+            batch_size = 1
+            if max_seq_len > 2048:
+                max_seq_len = 2048
+                print(f"Auto-tuned max_seq_length to {max_seq_len} (GPU: {gpu_mem_gb:.0f} GB)")
+        if batch_size != effective_batch:
+            print(f"Auto-tuned batch_size {effective_batch} → {batch_size} (GPU: {gpu_mem_gb:.0f} GB)")
     grad_accum = max(effective_batch // batch_size, 1)
 
     training_args = TrainingArguments(
