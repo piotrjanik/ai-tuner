@@ -14,7 +14,7 @@ vars:
   MODEL_NAME:
     sh: grep 'ollama_model_name:' config.yaml | awk '{print $2}' | tr -d '"'
   LLAMA_CONVERT:
-    sh: ls /opt/homebrew/Cellar/llama.cpp/*/libexec/convert_hf_to_gguf.py | tail -1
+    sh: ls /opt/homebrew/Cellar/llama.cpp/*/libexec/convert_hf_to_gguf.py 2>/dev/null | tail -1 || echo ""
 
 tasks:
   cli:
