@@ -54,7 +54,7 @@ tasks:
       - "nice -n {{.NICE}} {{.PYTHON}} src/train/train.py {{.CLI_ARGS}}"
 
   train:vm:
-    desc: "Train on existing VM with NVIDIA GPU via SSH. Requires: task train:vm -- --host <IP>"
+    desc: "Train on this VM with NVIDIA GPU. Installs deps, prepares data, trains. Options: --push, --resume, --skip-deps"
     cmds:
       - ./scripts/train_vm.sh {{.CLI_ARGS}}
 
