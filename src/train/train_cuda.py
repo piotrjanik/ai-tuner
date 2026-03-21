@@ -114,10 +114,10 @@ def main():
     gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
     effective_batch = batch_size
     if not args.batch_size:
-        if gpu_mem_gb <= 48:
+        if gpu_mem_gb <= 50:
             batch_size = 1
             max_seq_len = min(max_seq_len, 1024)
-        elif gpu_mem_gb <= 80:
+        elif gpu_mem_gb <= 90:  # H100 80GB reports ~85 GB
             batch_size = 2
             max_seq_len = min(max_seq_len, 2048)
         if batch_size != effective_batch:
