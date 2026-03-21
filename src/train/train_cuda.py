@@ -127,6 +127,7 @@ def main():
         eval_dataset=val_ds,
         args=SFTConfig(
             output_dir=str(adapter_path),
+            max_seq_length=cfg_seq,
             max_steps=max_steps,
             per_device_train_batch_size=cfg_batch,
             per_device_eval_batch_size=cfg_batch,
