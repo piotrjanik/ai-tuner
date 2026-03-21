@@ -67,16 +67,19 @@ echo "Using Python: $($PYTHON --version) from $VENV_DIR"
 if [[ "$SKIP_DEPS" == "false" ]]; then
   echo "── Installing dependencies ──"
 
-  # Install unsloth + trl with --no-deps to preserve CUDA torch
-  $PIP install -q --no-deps \
+  # Install torch + unsloth together (ensures CUDA torch)
+  $PIP install -q \
+      "torch>=2.8.0" "triton>=3.4.0" torchvision bitsandbytes \
       "unsloth @ git+https://github.com/unslothai/unsloth" \
       "unsloth_zoo @ git+https://github.com/unslothai/unsloth-zoo"
-  $PIP install -q --no-deps trl==0.22.2
 
-  # Install remaining deps (these don't replace torch)
-  $PIP install -q transformers==4.56.2 tokenizers bitsandbytes triton \
+  # Pin exact versions (--no-deps to avoid version conflicts)
+  $PIP install -q --no-deps transformers==4.56.2 tokenizers trl==0.22.2
+
+  # Install remaining deps
+  $PIP install -q \
       "peft>=0.13.0" "accelerate>=1.0.0" "typer>=0.12.0" \
-      pyyaml tqdm "huggingface_hub[cli]" "datasets>=2.14.0" xformers
+      pyyaml tqdm "huggingface_hub[cli]" "datasets>=3.4.1,<4.4.0" xformers
 
   # Flash Attention (optional, Ampere+ only)
   timeout 120 $PIP install -q flash-attn --no-build-isolation 2>/dev/null \
@@ -90,7 +93,7 @@ $PYTHON -c "
 import torch
 assert torch.cuda.is_available(), 'CUDA not available — check NVIDIA drivers'
 props = torch.cuda.get_device_properties(0)
-print(f'✓ torch {torch.__version__}, GPU: {props.name} ({props.total_mem / 1e9:.0f} GB)')
+print(f'✓ torch {torch.__version__}, GPU: {props.name} ({props.total_memory / 1e9:.0f} GB)')
 "
 
 # ── Prepare data ────────────────────────────────────────────────────────────
