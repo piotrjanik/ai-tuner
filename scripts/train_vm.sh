@@ -51,14 +51,21 @@ if ! command -v nvidia-smi &>/dev/null || ! nvidia-smi &>/dev/null; then
   exit 1
 fi
 
+# ── Create / activate venv ───────────────────────────────────────────────────
+VENV_DIR="${HOME}/.venv-ai-tuner"
+if [[ ! -d "$VENV_DIR" ]]; then
+  echo "── Creating Python venv at $VENV_DIR ──"
+  sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv python3-full 2>/dev/null || true
+  python3 -m venv "$VENV_DIR" --system-site-packages
+fi
+source "$VENV_DIR/bin/activate"
+PIP="$VENV_DIR/bin/pip"
+PYTHON="$VENV_DIR/bin/python3"
+echo "Using Python: $($PYTHON --version) from $VENV_DIR"
+
 # ── Install dependencies ────────────────────────────────────────────────────
 if [[ "$SKIP_DEPS" == "false" ]]; then
   echo "── Installing dependencies ──"
-
-  # Ensure pip is available
-  command -v pip3 &>/dev/null || command -v pip &>/dev/null \
-    || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip; }
-  PIP=$(command -v pip3 || command -v pip)
 
   # Install unsloth + trl with --no-deps to preserve CUDA torch
   $PIP install -q --no-deps \
@@ -79,7 +86,7 @@ else
 fi
 
 # ── Verify CUDA ─────────────────────────────────────────────────────────────
-python3 -c "
+$PYTHON -c "
 import torch
 assert torch.cuda.is_available(), 'CUDA not available — check NVIDIA drivers'
 props = torch.cuda.get_device_properties(0)
@@ -88,11 +95,11 @@ print(f'✓ torch {torch.__version__}, GPU: {props.name} ({props.total_mem / 1e9
 
 # ── Prepare data ────────────────────────────────────────────────────────────
 echo "── Preparing training data ──"
-python3 src/data/prepare_data.py --config config.yaml
+$PYTHON src/data/prepare_data.py --config config.yaml
 
 # ── Train ────────────────────────────────────────────────────────────────────
 echo "── Starting training ──"
-python3 src/train/train_cuda.py --config config.yaml $RESUME
+$PYTHON src/train/train_cuda.py --config config.yaml $RESUME
 
 echo "── Training complete! ──"
 ls -lh output/adapters/
@@ -100,7 +107,7 @@ ls -lh output/adapters/
 # ── Push to HuggingFace (optional) ──────────────────────────────────────────
 if [[ "$PUSH_HF" == "true" ]]; then
   echo "── Pushing adapters to HuggingFace ──"
-  python3 src/cli.py push
+  $PYTHON src/cli.py push
 fi
 
 echo ""
