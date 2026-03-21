@@ -106,7 +106,18 @@ def main():
 
     # ── Trainer ─────────────────────────────────────────────────────────────
     max_steps = tc.get("iters", 10000)
-    grad_accum = max(4 // batch_size, 1)
+
+    # Auto-tune: halve batch size until it fits, compensate with grad accumulation
+    gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+    effective_batch = batch_size
+    # 32B 4-bit model needs ~20GB base + ~15GB per batch item at seq_len=4096
+    # On 80GB H100 with 32B: batch=2 is safe, batch=4 OOMs
+    if gpu_mem_gb < 160:  # single GPU (not multi-GPU with >160GB total)
+        max_batch_for_mem = max(1, int((gpu_mem_gb - 25) / 14))
+        if batch_size > max_batch_for_mem:
+            batch_size = max(1, max_batch_for_mem)
+            print(f"Auto-tuned batch_size to {batch_size} (GPU: {gpu_mem_gb:.0f} GB)")
+    grad_accum = max(effective_batch // batch_size, 1)
 
     training_args = TrainingArguments(
         output_dir=str(adapter_path),
