@@ -58,6 +58,24 @@ tasks:
     cmds:
       - ./scripts/train_vm.sh {{.CLI_ARGS}}
 
+  train:sky:
+    desc: "Train via SkyPilot (any cloud). Override GPU: task train:sky -- --gpus A100:1"
+    preconditions:
+      - sh: command -v sky
+        msg: "Install SkyPilot: pip install 'skypilot[gcp]'  (or [aws], [all])"
+    cmds:
+      - sky launch -c ai-tuner sky/train.yaml {{.CLI_ARGS}}
+
+  train:sky:down:
+    desc: "Tear down the SkyPilot training cluster"
+    cmds:
+      - sky down ai-tuner -y
+
+  train:sky:status:
+    desc: "Check SkyPilot cluster status"
+    cmds:
+      - sky status
+
   train:google:
     desc: "Train on Google Cloud GPU VM (default: L4). Override: task train:google -- --gpu a100"
     preconditions:
