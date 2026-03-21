@@ -53,6 +53,11 @@ tasks:
     cmds:
       - "nice -n {{.NICE}} {{.PYTHON}} src/train/train.py {{.CLI_ARGS}}"
 
+  train:vm:
+    desc: "Train on existing VM with NVIDIA GPU via SSH. Requires: task train:vm -- --host <IP>"
+    cmds:
+      - ./scripts/train_vm.sh {{.CLI_ARGS}}
+
   train:google:
     desc: "Train on Google Cloud GPU VM (default: L4). Override: task train:google -- --gpu a100"
     preconditions:
